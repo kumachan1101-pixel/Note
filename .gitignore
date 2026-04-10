@@ -1,0 +1,20 @@
+# APIキー・機密情報
+src/GEMINI_API_KEY.txt
+*.key
+*.env
+.env
+
+# Pythonキャッシュ
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ログ・デバッグ出力
+outputs/logs/
+
+# OS生成ファイル
+.DS_Store
+Thumbs.db

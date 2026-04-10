@@ -1,0 +1,88 @@
+id: article_upgrade_flow
+description: "NOTE記事（ソフトウェア設計ジャンル）を再設計・品質強化するフロー"
+version: "2.0"
+
+# 注意: このYAMLは設計ドキュメントです。
+# 実行制御は src/article_flow.py の SKILL_ORDER リストが担います。
+
+steps:
+  - id: load_article
+    skill: load_article
+    description: "記事読み込み・分離（TITLE / CONTENT）"
+
+  - id: article_diagnosis
+    skill: article_diagnosis
+    description: "記事の問題点を特定（冒頭・内容・構成・トーン）"
+    depends_on: [load_article]
+    output_format: json
+
+  - id: value_gap_analysis
+    skill: value_gap_analysis
+    description: "読者期待とのズレ分析"
+    depends_on: [article_diagnosis]
+    output_format: json
+
+  - id: angle_reconstruction
+    skill: angle_reconstruction
+    description: "切り口を再設計（失敗/誤解/逆説パターン）"
+    depends_on: [value_gap_analysis]
+    output_format: json
+
+  - id: emotion_hook_design
+    skill: emotion_hook_design
+    description: "感情フック設計（読者が共感する入口を作る）"
+    depends_on: [angle_reconstruction]
+    output_format: text
+
+  - id: intro_reconstruction
+    skill: intro_reconstruction
+    description: "冒頭を再設計（感情フック→問題提示→記事価値）"
+    depends_on: [emotion_hook_design]
+    output_format: text
+
+  - id: structure_reorganization
+    skill: structure_reorganization
+    description: "構成を再設計（現場の問題→原因→解決→実例→まとめ）"
+    depends_on: [intro_reconstruction]
+    output_format: json
+
+  - id: depth_injection
+    skill: depth_injection
+    description: "各セクションに深みを補強（読者の次の疑問に答える）"
+    depends_on: [structure_reorganization]
+    output_format: json
+
+  - id: example_reinforcement
+    skill: example_reinforcement
+    description: "具体例を追加（コード例・実務シナリオ）"
+    depends_on: [depth_injection]
+    output_format: text
+
+  - id: tone_refinement
+    skill: tone_refinement
+    description: "トーンを共感ベースに変換"
+    depends_on: [example_reinforcement]
+    output_format: json
+
+  - id: title_reconstruction
+    skill: title_reconstruction
+    description: "タイトル5案を生成"
+    depends_on: [tone_refinement]
+    output_format: json
+
+  - id: cta_design
+    skill: cta_design
+    description: "締め文・CTA設計（フォロー誘導・次の記事への橋渡し）"
+    depends_on: [title_reconstruction]
+    output_format: text
+
+  - id: final_article_generation
+    skill: final_article_generation
+    description: "全スキルの成果を統合し、完成版Markdown記事を生成"
+    depends_on: [cta_design]
+    output_format: text
+
+  - id: save_article
+    skill: save_article
+    description: "markdown形式で保存（outputs/*_upgraded.md）"
+    depends_on: [final_article_generation]
