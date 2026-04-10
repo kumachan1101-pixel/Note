@@ -15,6 +15,9 @@ __pycache__/
 # ログ・デバッグ出力
 outputs/logs/
 
+# GitHub Actions（workflowスコープPATが必要なため別途管理）
+.github/
+
 # OS生成ファイル
 .DS_Store
 Thumbs.db
