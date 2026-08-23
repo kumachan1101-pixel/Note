@@ -1,0 +1,26 @@
+{
+  "_comment": "記事ごとにこのファイルをコピーして編集する",
+
+  "title": "【ソフトウェア設計】記事タイトル",
+
+  "tags": ["AI", "設計", "ソフトウェア設計"],
+
+  "coverImage": "cover.jpg",
+
+  "bodyImages": [
+    {
+      "file": "body-image.png",
+      "afterText": "この段落の直後に画像を挿入する（完全一致のテキストを指定）"
+    }
+  ],
+
+  "kindleBooks": [
+    "https://www.amazon.co.jp/dp/B0FR4FNM67",
+    "https://www.amazon.co.jp/dp/B0GSMK45YY"
+  ],
+
+  "cdpUrl": "http://localhost:9222",
+
+  "isUpdate": false,
+  "updateNoteId": ""
+}
