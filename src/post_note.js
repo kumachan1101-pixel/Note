@@ -87,9 +87,47 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// note には表機能が無く <table> は1段落に潰れて崩れる。
+// marked に渡す前に Markdown の表を箇条書きへ変換する。
+function convertTablesToBullets(md) {
+  const lines = md.split('\n');
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const isTableHead =
+      lines[i].trim().startsWith('|') &&
+      i + 1 < lines.length &&
+      /^\|[\s:|-]+\|/.test(lines[i + 1].trim());
+    if (isTableHead) {
+      const header = lines[i].trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+      let j = i + 2;
+      const rows = [];
+      while (j < lines.length && lines[j].trim().startsWith('|')) {
+        rows.push(lines[j].trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim()));
+        j++;
+      }
+      for (const r of rows) {
+        if (r.length === 2) {
+          out.push(`- **${r[0]}**：${r[1]}`);
+        } else {
+          const rest = r.slice(1).map((c, k) => `${header[k + 1] || ''}：${c}`).join(' ／ ');
+          out.push(`- **${r[0]}** — ${rest}`);
+        }
+      }
+      out.push('');
+      i = j;
+    } else {
+      out.push(lines[i]);
+      i++;
+    }
+  }
+  return out.join('\n');
+}
+
 function mdToHtml(markdown) {
   marked.setOptions({ renderer, gfm: true, breaks: false });
-  return marked.parse(markdown).replace(/^\s*\n/gm, '').trim();
+  const pre = convertTablesToBullets(markdown);
+  return marked.parse(pre).replace(/^\s*\n/gm, '').trim();
 }
 
 // ===== ユーティリティ =====
@@ -259,26 +297,34 @@ const bodyHtml = mdToHtml(markdown);
     const coverPath = path.resolve(path.dirname(configPath), coverImage);
     if (fs.existsSync(coverPath)) {
       console.log('🖼️  カバー画像アップロード中...');
-      // file inputをインターセプト
+      // カバー画像ボタン（上部の丸アイコン）をクリック → メニューを開く
+      await page.evaluate(() => {
+        const btn = document.querySelector('button[data-id="ButtonIcon"]');
+        if (btn) btn.click();
+      });
+      await sleep(700);
+      // 「画像をアップロード」を押すと file chooser が開く
       const [fileChooser] = await Promise.all([
         page.waitForFileChooser({ timeout: 5000 }).catch(() => null),
         page.evaluate(() => {
-          const btn = [...document.querySelectorAll('button')].find(
-            (b) => (b.getAttribute('aria-label') || '').includes('カバー') ||
-                   (b.textContent || '').includes('カバー画像') ||
-                   (b.getAttribute('aria-label') || '').includes('画像の配置')
-          );
-          if (btn) btn.click();
+          const item = [...document.querySelectorAll('button, a, li, [role="menuitem"]')]
+            .find((e) => (e.textContent || '').trim().startsWith('画像をアップロード'));
+          if (item) item.click();
         }),
       ]);
       if (fileChooser) {
         await fileChooser.setFiles(coverPath);
-        await sleep(1000);
-        // 「保存」ボタンがあればクリック
-        const saveBtn = await page.$('button:has-text("保存")');
-        if (saveBtn) await saveBtn.click();
-        await sleep(500);
-        console.log('✅ カバー画像アップロード完了');
+        // トリミングダイアログの「保存」を、ダイアログが閉じるまでリトライ
+        let saved = false;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          await sleep(1000);
+          const saveBtn = await page.$('button:has-text("保存")');
+          if (!saveBtn) { saved = true; break; }
+          await saveBtn.click().catch(() => {});
+          await sleep(1200);
+          if (!(await page.$('button:has-text("保存")'))) { saved = true; break; }
+        }
+        console.log(saved ? '✅ カバー画像アップロード完了' : '⚠️  カバー保存ダイアログが閉じませんでした');
       } else {
         console.warn('⚠️  カバー画像のfile chooserが開きませんでした（手動で設定してください）');
       }
@@ -330,11 +376,13 @@ const bodyHtml = mdToHtml(markdown);
           (b) => b.textContent.trim() === '画像' && b.offsetParent !== null
         );
         if (!imgBtn) {
-          // 「+」ボタンをクリックしてメニューを開く
-          const plusBtn = [...document.querySelectorAll('button')].find(
-            (b) => b.offsetParent !== null &&
-                   (b.textContent.trim() === '+' || (b.getAttribute('aria-label') || '').includes('追加'))
-          );
+          // 「+」ボタン（挿入メニュー）をクリックしてメニューを開く。
+          // 空段落にカーソルがあるとき aria-label="メニューを開く" のボタンが現れる。
+          const plusBtn = document.querySelector('button[aria-label="メニューを開く"]') ||
+            [...document.querySelectorAll('button')].find(
+              (b) => b.offsetParent !== null &&
+                     (b.textContent.trim() === '+' || (b.getAttribute('aria-label') || '').includes('追加') || (b.getAttribute('aria-label') || '').includes('メニュー'))
+            );
           if (plusBtn) {
             plusBtn.click();
             await new Promise((r) => setTimeout(r, 400));
@@ -382,17 +430,16 @@ const bodyHtml = mdToHtml(markdown);
         await sleep(waitMs);
       };
 
-      await pasteHTML('<p>この記事が少しでも参考になった方へ</p>', 500);
-      await pasteHTML(
-        '<p>関連書籍として以下もあわせて紹介します。Kindle Unlimitedの対象になっている場合は、追加費用なしでそのまま読むことができます。</p>',
-        500
-      );
-      for (const url of books) {
-        await pasteHTML(
-          `<figure data-src="${url}" data-identifier="null" embedded-service="external-article" contenteditable="false" draggable="true"></figure>`,
-          3000
-        );
-      }
+      // 【重要】figureを1枚ずつ連続ペーストすると note のカード変換タイミングで取りこぼす。
+      //   紹介文 + 全figure を「空段落 <p></p> 区切りで1回のペースト」にまとめると確実。
+      const figs = books
+        .map((url) => `<figure data-src="${url}" data-identifier="null" embedded-service="external-article" contenteditable="false" draggable="true"></figure>`)
+        .join('<p></p>');
+      const block =
+        '<p>この記事が少しでも参考になった方へ</p>' +
+        '<p>関連書籍として以下もあわせて紹介します。Kindle Unlimitedの対象になっている場合は、追加費用なしでそのまま読むことができます。</p>' +
+        figs;
+      await pasteHTML(block, Math.max(6000, 3000 * books.length));
     }, kindleBooks);
     console.log('✅ Kindle末尾追加完了');
   }

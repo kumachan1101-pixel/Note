@@ -2,6 +2,44 @@
 
 最終更新: 2026-08-29
 
+---
+
+## ★ 完全自動化パイプライン（AI非依存・推奨）
+
+座標クリックやスクリーンショット判断を使わず、**セレクタ + JSイベントだけ**で下書きを構築する決定論的な手順を確立済み。AIの判断に依存せず、同じ入力から常に同じ結果が得られる。
+
+### 使うファイル
+
+- `prep_svg.js` … SVG図を PNG に変換（Playwright＝ブラウザのフォント描画。日本語の□化を防ぐ）
+- `src/post_note.js` … Playwrightで note を全自動操作（タイトル・本文・カバー・本文画像・Kindle）
+- `note_auto_post.js` … 拡張機能/コンソールから流し込む版（同じロジックのブラウザ内ルーチン `window.notePost(cfg)`）
+- `post_config.json` … タイトル・タグ・カバー・本文画像位置・Kindle書籍URLを定義
+
+### 手順（例）
+
+```bash
+# 1. SVG図をPNGへ変換（フォント化けを防ぐ）
+node prep_svg.js images/ai-verifiable-output.svg ai-verifiable-output.png 1280 720
+
+# 2. カバー画像を用意（本文画像とは別ファイル。例: cover.jpg）
+
+# 3. 全自動投稿（下書き作成）
+node src/post_note.js article.md post_config.json
+```
+
+### この方式で自動化された「判断が要らない」ポイント
+
+- **表 → 箇条書き変換**：note に表機能は無く `<table>` は潰れるため、`mdToHtml` が Markdown の表を自動で箇条書きへ変換する（`| 2列 |`→「**左**：右」、3列以上→「**左** — 見出し：値 ／ …」）。
+- **カバー画像ボタン**：`button[data-id="ButtonIcon"]`（座標不要）。
+- **本文画像の「+」ボタン**：`button[aria-label="メニューを開く"]`（座標不要）。
+- **画像アップロード**：`fileChooser.setFiles()`（Playwright）／ `input.files` への native setter 注入（拡張機能）でOSダイアログを回避。
+- **カバー保存**：トリミングの「保存」を**ダイアログが閉じるまでリトライ**（1回では2枚目のダイアログが残ることがある）。
+- **Kindleカード**：figureを1枚ずつ連続ペーストすると1枚取りこぼすため、**紹介文＋全figureを空段落区切りで“1回のペースト”**にまとめる。
+
+以降は、上記が使えない場合の手動フロー（Claude in Chrome）の詳細。
+
+---
+
 ## 概要
 
 Claude in Chrome（ブラウザ直接操作）で note.com に記事を投稿する。Pythonスクリプト・セッションCookie取得は不要。
