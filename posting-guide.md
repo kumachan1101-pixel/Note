@@ -1,32 +1,121 @@
-# note.com è¨äºæç¨¿æé ï¼ç¢ºå®çï¼
+# note.com 記事投稿手順（確定版）
 
-æçµæ´æ°: 2026-07-25
+最終更新: 2026-08-29
 
-## æ¦è¦
+## 概要
 
-Claude in Chromeï¼ãã©ã¦ã¶ç´æ¥æä½ï¼ã§ note.com ã«è¨äºãæç¨¿ãããPythonã¹ã¯ãªããã»ã»ãã·ã§ã³Cookieåå¾ã¯ä¸è¦ã
+Claude in Chrome（ブラウザ直接操作）で note.com に記事を投稿する。Pythonスクリプト・セッションCookie取得は不要。
+
+記事は以下の要素で構成する：
+
+1. タイトル
+2. 本文（Markdown → HTML）
+3. **カバー画像（表紙）** ← 本文画像とは必ず別の画像
+4. **本文内画像**（特定段落の直後に挿入）
+5. **Kindle書籍リンク（末尾）**
+6. ハッシュタグ（`#ソフトウェア設計` を含め計5個）
+
+> ⚠️ **カバー画像と本文画像は別物。** 本文中の図解をカバーに流用しないこと。カバーは記事ごとに用意した `cover.jpg` を使う。
 
 ---
 
-## æç¨¿ãã­ã¼
+## 事前準備：画像の用意（SVG→PNG変換）
 
-### 1. æ°è¦ãã¼ãä½æ
+図解を **SVG** で受け取った場合は、必ず **PNG に変換してから** アップロードする。note の画像アップロードは PNG/JPG を想定しており、SVG のままだと崩れる。
 
-`https://note.com/notes/new` ã« navigate â URLã `note.com/login` ã«ãªã£ãå ´åã¯ã­ã°ã¤ã³åãã®ããã¦ã¼ã¶ã¼ã«å ±åãã¦åæ­¢ã
+### 日本語フォントの文字化け対策（重要）
 
-### 2. ã¿ã¤ãã«è¨­å®ï¼javascript_toolï¼
+SVG 内のフォント指定が `Noto Sans JP` などの場合、変換環境にそのフォント名が無いと **日本語がすべて □（豆腐）になる**。変換前にフォント名を、環境にインストール済みの CJK フォント名へ置換する。
+
+```bash
+# フォント名を環境のCJKフォントに置換
+sed 's/Noto Sans JP/Noto Sans CJK JP/g; \
+     s/Yu Gothic/Noto Sans CJK JP/g; \
+     s/Hiragino Kaku Gothic ProN/Noto Sans CJK JP/g' \
+     input.svg > fixed.svg
+
+# cairosvg で PNG 変換（本文図は 1280x720、カバーは 1280x670 推奨）
+python3 -c "import cairosvg; cairosvg.svg2png(url='fixed.svg', write_to='output.png', output_width=1280, output_height=720)"
+```
+
+**確認：** 変換後の PNG を必ず目視で開き、日本語が □ になっていないかチェックする。ファイルサイズが極端に小さい（数KB）場合はフォント未適用の疑い。正しく描画されていれば通常 100KB 前後になる。
+
+---
+
+## 画像アップロードの共通方式（fetch注入・低コスト）
+
+note の画像挿入は OS のファイル選択ダイアログを開く。このダイアログはブラウザ自動化からは操作できず、スクリーンショットもフリーズする。そこで **ローカルHTTPサーバー経由の fetch 注入** を使う。画像バイト列がコンテキストを通らないため、通信コストも最小になる。
+
+### 準備：ローカルサーバー起動
+
+`cors_server.py`（CORS許可付き）を Downloads で起動し、`http://localhost:8989/` から画像を配信する。変換した PNG を Downloads に置く。
+
+### 注入手順
+
+1. **file input を先回りで捕捉するパッチを仕込む**（ネイティブダイアログを封じ、`fetch`した画像を注入）：
 
 ```javascript
-const titleEl = document.querySelector('textarea[placeholder="è¨äºã¿ã¤ãã«"]');
+window.__imgInjected = false;
+window.__imgResult = null;
+const origClick = HTMLInputElement.prototype.click;
+HTMLInputElement.prototype.click = function () {
+  if (this.type === 'file') return;      // ネイティブダイアログを封鎖
+  return origClick.call(this);
+};
+window.__imgObserver = new MutationObserver(async (muts) => {
+  if (window.__imgInjected) return;
+  for (const m of muts) for (const node of m.addedNodes) {
+    if (node.nodeType !== 1) continue;
+    const inputs = node.matches?.('input[type="file"]')
+      ? [node] : [...(node.querySelectorAll?.('input[type="file"]') || [])];
+    for (const input of inputs) {
+      if (window.__imgInjected) continue;
+      window.__imgInjected = true;
+      // ?t= と no-store でキャッシュ回避（古い画像配信を防ぐ）
+      const resp = await fetch('http://localhost:8989/output.png?t=' + Date.now(), { cache: 'no-store' });
+      const blob = await resp.blob();
+      const file = new File([blob], 'output.png', { type: 'image/png' });
+      const dt = new DataTransfer(); dt.items.add(file);
+      const ns = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files').set;
+      ns.call(input, dt.files);
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      window.__imgResult = 'injected size=' + file.size;
+      HTMLInputElement.prototype.click = origClick;   // パッチ解除
+    }
+  }
+});
+window.__imgObserver.observe(document.body, { childList: true, subtree: true });
+```
+
+2. 画像メニューの「画像」ボタンを **JSで** クリックする（`computer` でのクリックだとダイアログが開いてフリーズする）。パッチが file input を捕捉し、`window.__imgResult` に `injected size=...` が入れば成功。
+
+> **キャッシュ回避を必ず入れる。** 前回、サーバー上の画像を差し替えたのにブラウザが旧版（文字化けPNG）をキャッシュから返し、失敗した。`?t=Date.now()` + `cache:'no-store'` で防ぐ。
+
+---
+
+## 投稿フロー
+
+### 1. 新規ノート作成
+
+`https://note.com/notes/new` に navigate → URLが `note.com/login` になった場合はログイン切れのためユーザーに報告して停止。
+
+### 2. タイトル設定（javascript_tool）
+
+```javascript
+const titleEl = document.querySelector('textarea[placeholder="記事タイトル"]');
 const titleSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-titleSetter.call(titleEl, 'ã¿ã¤ãã«æå­å');
+titleSetter.call(titleEl, 'タイトル文字列');
 titleEl.dispatchEvent(new Event('input', { bubbles: true }));
 ```
 
-### 3. æ¬æãã¼ã¹ãï¼javascript_tool 1åï¼
+### 3. 本文ペースト（javascript_tool 1回）
+
+本文HTMLは Downloads に置いてローカルサーバー経由で `fetch` すると、巨大な文字列をコンテキストに通さずに済む（低コスト）。
 
 ```javascript
-const BODY_HTML = `<h2>è¦åºã</h2><p>æ¬æ</p>`;
+const resp = await fetch('http://localhost:8989/article_body.html?t=' + Date.now(), { cache: 'no-store' });
+const BODY_HTML = await resp.text();
 
 const editor = document.querySelector('.ProseMirror');
 editor.focus();
@@ -38,72 +127,105 @@ editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: t
 await new Promise(r => setTimeout(r, 1000));
 ```
 
-**HTMLå¤æã«ã¼ã«ï¼**
-- `##` â `<h2>`
-- ã³ã¼ããã­ãã¯ â `<pre><code class="language-X">`
-- `<table>` ã¿ã°ä½¿ç¨ç¦æ­¢ï¼ProseMirrorã§å±éãããªãï¼ãè¡¨ã¯ `<p><strong>ã©ãã«</strong> â å¤</p>` å½¢å¼ã§æ¸ã
+**HTML変換ルール：**
+- `##` → `<h2>`
+- 先頭の `## タイトル` ラベル行、および `# タイトル`（H1）は本文から除去する（タイトルは別欄で設定するため）
+- 画像を入れる位置には空段落を残しておく（後で本文画像を挿入）
+- コードブロック → `<pre><code class="language-X">`
+- `<table>` タグ使用禁止（ProseMirrorで展開されない）。表は `<p><strong>ラベル</strong> → 値</p>` 形式で書く
 
-**ç¢ºèªï¼** `document.querySelector('.ProseMirror').textContent.length` ã§æå­æ°ãä¸è´ããã°OKãã¹ã¯ãªã¼ã³ã·ã§ããã§ã®ç®è¦ç¢ºèªã¯ä¸è¦ã
+**確認：** `document.querySelector('.ProseMirror').textContent.length` で文字数が一致し、`querySelectorAll('h2').length` が想定の見出し数と一致すればOK。二重ペーストで見出し数が倍になっていないか必ず確認する。
 
-### 4. ã«ãã¼ç»åã¢ããã­ã¼ã
+### 4. カバー画像アップロード（本文画像とは別の画像）
 
-#### ã¹ããã1ï¼file input ãåºç¾ããã
+上部の画像追加ボタン（📷）をクリック → メニューの「画像をアップロード」（推奨 1280×670px）。
+
+「画像アップロードの共通方式」のパッチを仕込んだうえで、「画像をアップロード」を **JSでクリック**。file input が捕捉され `cover.jpg`（＝カバー専用画像）が注入される。
+
+トリミングダイアログが出るので **「保存」ボタン** をクリックして確定する（座標は `scrollIntoView` 後に再取得）。
+
+**成功確認：**
+```javascript
+// data:image/png または assets.st-note.com を含む img がカバー領域にあればOK
+document.querySelectorAll('img').length
+```
+
+> スクリーンショットが白く写ることがある（既知のレンダリング問題）。その場合は JS で `img.naturalWidth/naturalHeight` を確認すれば画像読み込みは判定できる。
+
+### 5. 本文内画像の挿入（特定段落の直後）
+
+図解などの本文画像を、指定した段落の直後に挿入する。
+
+1. 対象段落の **次の空段落** にカーソルを置く：
 
 ```javascript
-// ãç»åãè¿½å ããã¿ã³ãã¯ãªãã¯ãã¦ã¡ãã¥ã¼ãåºã
-document.querySelector('button[aria-label="ç»åãè¿½å "]').click();
+const paras = [...document.querySelectorAll('.ProseMirror p')];
+const idx = paras.findIndex(p => p.innerText.includes('挿入したい段落の一部テキスト'));
+const empty = paras[idx + 1];               // 直後の空段落
+const absTop = empty.getBoundingClientRect().top + window.scrollY;
+window.scrollTo({ top: Math.max(0, absTop - 200), behavior: 'instant' });
 ```
 
-â ãç»åãã¢ããã­ã¼ãããã¯ãªãã¯ï¼computer ãã¼ã«ã§ã¡ãã¥ã¼é ç®ãã¯ãªãã¯ï¼
+2. `computer` で空段落をクリック → 左に出る **「＋」ボタン** をクリック → 画像メニューを開く。
+3. 「画像アップロードの共通方式」のパッチを仕込み、本文画像PNGのURLを指定して「画像」を **JSでクリック**して注入。
+4. `window.__imgResult` に `injected size=...` が入り、エディタ内に該当図の `img` が増えれば成功。
 
-#### ã¹ããã2ï¼file input ãæ¢ã
+### 6. Kindle書籍リンクの末尾追加
 
-`read_page(filter:'all', depth:1)` ã§ `button [refN] type="file"` ãæ¢ã
-
-#### ã¹ããã3ï¼ç»åãã¢ããã­ã¼ã
-
-```
-file_upload(ref: refN, paths: ["/path/to/image.png"])
-```
-
-#### ã¹ããã4ï¼ãä¿å­ããã¿ã³ãã¯ãªãã¯ï¼æ¹åçï¼
-
-2ç§å¾ã£ã¦ããä»¥ä¸ã®JSã§åº§æ¨ãåå¾ãã¦ã¯ãªãã¯ï¼
+本文の最後に、定型文＋書籍の埋め込みカードを追加する。書籍URLは記事ごとに `post_config.json` の `kindleBooks` で指定。
 
 ```javascript
-// ä¿å­ãã¿ã³ãç»é¢ä¸­å¤®ã«ã¹ã¯ã­ã¼ã«ãã¦ããåº§æ¨åå¾ï¼ãã¥ã¼ãã¼ãç«¯ã§ã®åº§æ¨ãºã¬é²æ­¢ï¼
-const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'ä¿å­');
-btn.scrollIntoView({ block: 'center', inline: 'center' });
+const books = [
+  'https://www.amazon.co.jp/dp/XXXXXXXXXX',
+  'https://www.amazon.co.jp/dp/YYYYYYYYYY',
+];
+const editor = document.querySelector('.ProseMirror');
+editor.focus();
+const lastEl = editor.lastElementChild;
+lastEl.scrollIntoView({ block: 'center' });
+const range = document.createRange();
+range.selectNodeContents(lastEl);
+range.collapse(false);
+window.getSelection().removeAllRanges();
+window.getSelection().addRange(range);
 await new Promise(r => setTimeout(r, 300));
-const rect = btn.getBoundingClientRect();
-return { cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2 };
+
+const pasteHTML = async (html, waitMs = 500) => {
+  const dt = new DataTransfer();
+  dt.setData('text/html', html);
+  dt.setData('text/plain', '');
+  editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  await new Promise(r => setTimeout(r, waitMs));
+};
+
+await pasteHTML('<p>この記事が少しでも参考になった方へ</p>', 500);
+await pasteHTML('<p>関連書籍として以下もあわせて紹介します。Kindle Unlimitedの対象になっている場合は、追加費用なしでそのまま読むことができます。</p>', 500);
+for (const url of books) {
+  await pasteHTML(
+    `<figure data-src="${url}" data-identifier="null" embedded-service="external-article" contenteditable="false" draggable="true"></figure>`,
+    3000   // 埋め込みカード生成に時間がかかるため長めに待つ
+  );
+}
 ```
 
-â è¿ã£ã¦ãã cx, cy ã«ã¹ã±ã¼ã«ä¿æ°ï¼screenshotå¹ / viewportå¹ â 0.817ï¼ãæããåº§æ¨ã§ `computer left_click` ã2åå®è¡ã
+> `<figure ... embedded-service="external-article">` を貼ると note が Amazon の書籍カードに展開する。各URLの後は 3秒待つ。
 
-**æåç¢ºèªï¼**
-```javascript
-const imgs = document.querySelectorAll('img');
-// URLã« "assets.st-note.com" ãå«ã¾ãã img ãããã°OK
-```
+### 7. 公開設定画面へ移動
 
-### 5. å¬éè¨­å®ç»é¢ã¸ç§»å
-
-ãå¬éã«é²ãããã¿ã³ãã¯ãªãã¯ï¼
+「公開に進む」ボタンをクリック：
 
 ```javascript
-// ãã¼ã¹ãå¾1ç§ä»¥ä¸å¾ã£ã¦ããã¯ãªãã¯ï¼Reactç¶æåæå¾ã¡ï¼
-const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'å¬éã«é²ã');
+const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '公開に進む');
 btn.click();
 ```
 
-â URLã `/publish/` ã«å¤ããã°OKããã¿ã¤ãã«ãæ¬æãå¥åãã¦ãã ããããã¼ã¹ããåºãå ´åã¯éãã¦åã¯ãªãã¯ã
+→ URLが `/publish/` に変わればOK。「タイトル、本文を入力してください」トーストが出た場合は閉じて再クリック。
 
-### 6. ã¿ã°è¨­å®ï¼javascript_toolï¼
+### 8. タグ設定（javascript_tool）
 
 ```javascript
-const TAGS_ARRAY = ['ã½ããã¦ã§ã¢è¨­è¨', 'ã¿ã°2', 'ã¿ã°3', 'ã¿ã°4', 'ã¿ã°5'];
-const tagEl = document.querySelector('input[placeholder="ããã·ã¥ã¿ã°ãè¿½å ãã"]');
+const TAGS_ARRAY = ['ソフトウェア設計', 'タグ2', 'タグ3', 'タグ4', 'タグ5'];
+const tagEl = document.querySelector('input[placeholder="ハッシュタグを追加する"]');
 const tagSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
 
 for (const tag of TAGS_ARRAY) {
@@ -117,12 +239,12 @@ for (const tag of TAGS_ARRAY) {
 }
 ```
 
-**ã¿ã°ã®ã«ã¼ã«ï¼** `#ã½ããã¦ã§ã¢è¨­è¨` ã¯å¿ãå«ããè¨äºåå®¹ã«å¿ãã¦åè¨5åè¨­å®ã
+**記事タイプ：** 「無料」を選択（デフォルト）。
 
-### 7. æç¨¿ï¼javascript_toolï¼
+### 9. 投稿（javascript_tool）
 
 ```javascript
-// fireFullClickï¼åç´ãª .click() ã¯å¹ããªããããå®å¨ãªPointerEvent/MouseEventã·ã¼ã±ã³ã¹ãä½¿ã
+// fireFullClick：単純な .click() は効かないため、完全なPointerEvent/MouseEventシーケンスを使う
 function fireFullClick(el) {
   const rect = el.getBoundingClientRect();
   const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
@@ -134,119 +256,68 @@ function fireFullClick(el) {
   el.dispatchEvent(new MouseEvent('click', opts));
 }
 
-const publishBtn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'æç¨¿ãã');
+const publishBtn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '投稿する');
 fireFullClick(publishBtn);
 ```
 
-â æ°ç§å¾ã« `location.href` ããã§ãã¯ãURL ã `/publish/` ããå¤ãã£ã¦ããã°å¬éå®äºããè¨äºãå¬éããã¾ããããããã¢ãããåºããã¨ãããã
+→ 数秒後に `location.href` をチェック。URL が `/publish/` から変わっていれば公開完了。「記事が公開されました」ポップアップが出ることもある。
+
+> ⚠️ **テスト時は「公開に進む」以降を実行せず、下書き保存にとどめること。** 公開は本番でのみ行う。
 
 ---
 
-## ã¹ã¯ãªã¼ã³ã·ã§ããæ¹é
+## 投稿前チェックリスト
 
-| ã¿ã¤ãã³ã° | è¦å¦ |
+- [ ] タイトルを設定した
+- [ ] 本文の見出し数（h2）が想定と一致（二重ペーストなし）
+- [ ] **カバー画像を設定した（本文画像とは別の画像）**
+- [ ] **本文画像を指定段落の直後に挿入した**
+- [ ] 本文画像・カバー画像の日本語が □ になっていない（SVG起因の文字化けなし）
+- [ ] **Kindle書籍リンクを末尾に追加した**
+- [ ] ハッシュタグを5個設定（`#ソフトウェア設計` を含む）
+- [ ] 記事タイプ「無料」を選択
+
+---
+
+## スクリーンショット方針
+
+| タイミング | 要否 |
 |---|---|
-| ã¿ã¤ãã«ã»æ¬æãã¼ã¹ãå¾ | â ä¸è¦ï¼JSæ»ãå¤ã§ç¢ºèªï¼ |
-| ã«ãã¼ç»åããªãã³ã°ãã¤ã¢ã­ã°ç¢ºèª | â 1æï¼ãã¤ã¢ã­ã°ãè¦ãããç¢ºèªï¼ |
-| å¬éå®äºç¢ºèª | â 1æï¼ä»»æï¼ |
+| タイトル・本文ペースト後 | ❌ 不要（JS戻り値で確認） |
+| カバー画像トリミングダイアログ確認 | ✅ 1枚（ダイアログが見えるか確認） |
+| 本文画像挿入後 | ✅ 1枚（位置と描画確認） |
+| 公開完了確認 | ✅ 1枚（任意） |
 
-**ç®å®ï¼20ã25ã¿ã¼ã³ã§å®äº**
+**目安：20〜25ターンで完了**
 
 ---
 
-## ããããã¨ã©ã¼ã¨å¯¾å¦
+## よくあるエラーと対処
 
-| ã¨ã©ã¼ | å¯¾å¦ |
+| エラー | 対処 |
 |---|---|
-| `note.com/login` ã«ãªãã¤ã¬ã¯ã | ã­ã°ã¤ã³åããã¦ã¼ã¶ã¼ã«åã­ã°ã¤ã³ãä¾é ¼ |
-| ãã¿ã¤ãã«ã»æ¬æãå¥åãã¦ãã ããããã¼ã¹ã | Reactåæå¾ã¡ä¸è¶³ã1ã2ç§å¾ã£ã¦åã¯ãªãã¯ |
-| ãä¿å­ããã¿ã³ã¯ãªãã¯å¾ãã¤ã¢ã­ã°ãéããªã | åº§æ¨ãºã¬ã®å¯è½æ§ã`scrollIntoView`å¾ã«åº§æ¨ãååå¾ãã¦åã¯ãªãã¯ |
-| `æç¨¿ãã` ãã¿ã³ãåå¿ããªã | `fireFullClick` ãä½¿ã£ã¦ãããç¢ºèªãåç´ `.click()` ã¯ä¸å¯ |
+| `note.com/login` にリダイレクト | ログイン切れ。ユーザーに再ログインを依頼 |
+| 画像の日本語が □（豆腐）になる | SVGのフォント名を `Noto Sans CJK JP` 等へ置換してから変換 |
+| ファイル選択ダイアログでフリーズ／スクショが白い | `HTMLInputElement.prototype.click` をパッチし、fetch注入方式を使う |
+| 差し替えたはずの画像が古いまま | ブラウザキャッシュ。`?t=Date.now()` + `cache:'no-store'` を付ける |
+| カバーに本文の図が入ってしまう | カバーと本文画像は別ファイル。カバーは `cover.jpg` を使う |
+| 本文が二重になる（h2が倍） | ペースト前に `document.execCommand('selectAll')` で全選択→削除してから貼る |
+| 「タイトル・本文を入力してください」トースト | React同期待ち不足。1〜2秒待って再クリック |
+| 「保存」ボタンクリック後ダイアログが閉じない | 座標ズレの可能性。`scrollIntoView`後に座標を再取得して再クリック |
+| `投稿する` ボタンが反応しない | `fireFullClick` を使っているか確認。単純 `.click()` は不可 |
+| Kindleカードが展開されない | 各URLペースト後の待機を 3秒に。`embedded-service="external-article"` の属性を確認 |
 
 ---
 
-## æç¨¿æ¸ã¿è¨äºï¼ã½ããã¦ã§ã¢è¨­è¨ã·ãªã¼ãºï¼
+## 投稿済み記事（ソフトウェア設計シリーズ）
 
-| ã¿ã¤ãã« | URL |
+| タイトル | URL |
 |---|---|
-| ã¾ãåãã | https://note.com/rosy_flax9582/n/n68088c41faf0 |
-| éåæå¦çã»è²¬ä»»åé¢ | https://note.com/rosy_flax9582/n/n9edfbfc70ea3 |
-| ã¤ã³ã¿ã¼ãã§ã¼ã¹ã®ç²åº¦ | https://note.com/rosy_flax9582/n/ne2a9b0b0b465 |
-| ãã§ãã¯ãªã¹ãã¯å§ããåã«è¦ã | https://note.com/rosy_flax9582/n/n0d32a852dc99 |
-| å·ä½ã«å¥ãè¾¼ãã ã¨ãæ½è±¡ã«æ»ã | https://note.com/rosy_flax9582/n/n931c64d23d41 |
-| AIã¨ã®æ©æ¸¡ãã®è¨­è¨ | https://note.com/rosy_flax9582/n/n97dd8cf6f836 |
-| è¦ãã¦ããªãé¨åã¾ã§è¨ç»ã«å¥ãã | https://note.com/rosy_flax9582/n/n8f970d167036 |
-| å¼æ°ã ãã§ã¯åããæ±ºã¾ããªãé¢æ°ãåãé¢ã | https://note.com/rosy_flax9582/n/nf9f732ec9708 |
-
-
----
-
-## Kindle本紹介の記事末尾追加
-
-### 概要
-
-note.com の記事末尾に Kindle 本紹介ブロック（前文 + H3見出し + 書籍説明 + Amazonカード）を追加する手順。  
-スクリプト: `src/kindle_book_append.js`
-
-### Amazon カード埋め込みの仕組み（重要）
-
-note.com エディタに Amazon カードを埋め込むには **`<figure>` 形式の ClipboardEvent ペースト** が必須。
-
-| 方法 | 結果 |
-|------|------|
-| `<p>https://www.amazon.co.jp/dp/XXXX</p>` をペースト | ❌ URLテキストのまま（カード変換なし） |
-| `text/plain` で URL をペースト | ❌ 同上 |
-| `<figure embedded-service="external-article" data-src="URL">` をペースト | ✅ Amazonカード表示 |
-
-```javascript
-// Amazonカード埋め込みのコアコード
-const figHtml =
-  '<figure data-src="https://www.amazon.co.jp/dp/B0FR4FNM67"' +
-  ' data-identifier="null"' +
-  ' embedded-service="external-article"' +
-  ' contenteditable="false" draggable="true"></figure>';
-
-const dt = new DataTransfer();
-dt.setData('text/html', figHtml);
-dt.setData('text/plain', '');
-editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-```
-
-この形式は公開済み記事（`https://note.com/rosy_flax9582/n/na4ff430261c2`）のエディタ DOM を inspect して発見した。
-
-### 手順
-
-1. note.com エディタ画面を開く（下書き or 公開済み記事の編集）
-2. ブラウザのコンソール（F12 → Console）を開く
-3. `src/kindle_book_append.js` の内容を全コピー → コンソールに貼り付け → Enter
-4. 記事末尾に以下が自動挿入される：
-   - 前文段落（「この記事が少しでも参考になった方へ...」）
-   - H3「関連書籍」
-   - 書籍タイトル・説明文（P タグ）
-   - Amazon カード（`<figure embedded-service="external-article">`）× 書籍数
-5. コンソールに「✅ Kindle本紹介を末尾に追加しました」と表示されたら成功
-6. 「公開に進む」→「更新する」で保存
-
-### 書籍・テキストのカスタマイズ
-
-`src/kindle_book_append.js` 内の `KINDLE_BOOKS` 配列を編集するだけで書籍情報を変更できる：
-
-```javascript
-const KINDLE_BOOKS = [
-  {
-    title: '書籍タイトル',
-    description: '書籍説明文',
-    amazonUrl: 'https://www.amazon.co.jp/dp/[ASIN]',
-  },
-  // 追加書籍はここに続ける
-];
-```
-
-### トラブルシューティング
-
-| 症状 | 原因 | 対処 |
-|------|------|------|
-| Amazonカードが表示されずURLテキストになる | figure形式以外でペーストしている | `text/html` に `<figure embedded-service="external-article">` を使う |
-| 前文が末尾でなく途中に挿入される | カーソル位置がずれている | TreeWalker で末尾テキストノードに setStart してから paste |
-| 前文がH3の中に入り込む | ペースト時の選択範囲がH3内にある | H3の中身を選択した状態でペーストしない。カーソルをH3の**前**の段落末尾に置く |
-| 同じテキストが二重になる | ペースト時にカーソルが段落末尾にあり既存テキストに追記された | 段落全体を selectNodeContents で選択してからペーストし既存内容を置き換える |
+| まず動かす | https://note.com/rosy_flax9582/n/n68088c41faf0 |
+| 非同期処理・責任分離 | https://note.com/rosy_flax9582/n/n9edfbfc70ea3 |
+| インターフェースの粒度 | https://note.com/rosy_flax9582/n/ne2a9b0b0b465 |
+| チェックリストは始める前に見る | https://note.com/rosy_flax9582/n/n0d32a852dc99 |
+| 具体に入り込んだとき抽象に戻る | https://note.com/rosy_flax9582/n/n931c64d23d41 |
+| AIとの橋渡しの設計 | https://note.com/rosy_flax9582/n/n97dd8cf6f836 |
+| 見えていない部分まで計画に入れる | https://note.com/rosy_flax9582/n/n8f970d167036 |
+| 引数だけでは動きが決まらない関数を切り離す | https://note.com/rosy_flax9582/n/nf9f732ec9708 |
